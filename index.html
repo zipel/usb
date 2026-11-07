@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MicMemo Pro: copy recordings by USB</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f6f4;
+    --panel: #ffffff;
+    --text: #1c1c1a;
+    --muted: #63635e;
+    --line: #d9d9d3;
+    --accent: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615;
+      --panel: #222220;
+      --text: #f1f1ee;
+      --muted: #a9a9a2;
+      --line: #3a3a37;
+      --accent: #ef5350;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 8px; }
+  p { margin: 0 0 16px; }
+  .lead, .note { color: var(--muted); }
+  .note { font-size: 0.9rem; }
+  ol { padding-left: 1.3em; margin: 0 0 24px; }
+  li { margin-bottom: 8px; }
+  code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .drop {
+    display: block;
+    border: 2px dashed var(--line);
+    border-radius: 12px;
+    background: var(--panel);
+    padding: 32px 16px;
+    text-align: center;
+    cursor: pointer;
+  }
+  .drop.over { border-color: var(--accent); }
+  .drop strong { display: block; margin-bottom: 4px; }
+  .drop span { color: var(--muted); font-size: 0.9rem; }
+  input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  button, .download {
+    display: inline-block;
+    font: inherit;
+    color: inherit;
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+  #status { margin: 24px 0 8px; font-weight: 600; }
+  .recording {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 12px;
+  }
+  .recording h2 { font-size: 1rem; margin: 0; overflow-wrap: anywhere; }
+  .recording p { color: var(--muted); font-size: 0.9rem; margin: 0 0 8px; }
+  audio { width: 100%; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Copy recordings by USB</h1>
+  <p class="lead">Get your MicMemo Pro recordings onto a computer with the watch's charging cable. Your files stay on your computer: this page reads them right here and uploads nothing.</p>
+
+  <ol>
+    <li>Close MicMemo Pro on the watch and connect the watch to your computer.</li>
+    <li>Open the watch's storage. On Windows it appears in File Explorer. On a Mac, you need a tool such as <a href="https://openmtp.ganeshrvel.com/">OpenMTP</a>.</li>
+    <li>Copy the folder <code>GARMIN/Apps/DATA</code> to your computer.</li>
+    <li>Choose that copied folder below.</li>
+  </ol>
+
+  <label class="drop" id="drop" for="folder">
+    <strong>Choose the copied DATA folder</strong>
+    <span>or drag it here</span>
+  </label>
+  <input type="file" id="folder" webkitdirectory multiple>
+  <div class="row">
+    <label for="files"><button type="button" id="filesButton">Choose files instead</button></label>
+    <input type="file" id="files" multiple accept=".dat,.idx,.DAT,.IDX">
+  </div>
+  <p class="note">If you choose files, pick both the <code>.DAT</code> and <code>.IDX</code> files with the same name. MicMemo Pro's file is usually the largest one.</p>
+
+  <p id="status" role="status" aria-live="polite"></p>
+  <div class="row" id="all" hidden><button type="button" id="downloadAll">Download all</button></div>
+  <div id="recordings"></div>
+</main>
+
+<script src="extract.js"></script>
+<script>
+  (function () {
+    const status = document.getElementById('status');
+    const list = document.getElementById('recordings');
+    const all = document.getElementById('all');
+    const drop = document.getElementById('drop');
+    let downloads = [];
+
+    function baseName(file) {
+      return file.name.replace(/\.[^.]*$/, '').toUpperCase();
+    }
+
+    function extension(file) {
+      return file.name.split('.').pop().toUpperCase();
+    }
+
+    function formatLength(ms) {
+      const total = Math.round((ms || 0) / 1000);
+      const minutes = Math.floor(total / 60);
+      const seconds = String(total % 60).padStart(2, '0');
+      return minutes + ':' + seconds;
+    }
+
+    async function process(files) {
+      status.textContent = 'Reading files…';
+      list.textContent = '';
+      all.hidden = true;
+      downloads.forEach(function (item) { URL.revokeObjectURL(item.url); });
+      downloads = [];
+
+      const indexes = new Map();
+      const stores = [];
+      for (const file of files) {
+        if (extension(file) === 'IDX') {
+          indexes.set(baseName(file), file);
+        } else if (extension(file) === 'DAT') {
+          stores.push(file);
+        }
+      }
+
+      let found = [];
+      for (const file of stores) {
+        const dat = new Uint8Array(await file.arrayBuffer());
+        const indexFile = indexes.get(baseName(file));
+        const idx = indexFile ? new Uint8Array(await indexFile.arrayBuffer()) : null;
+        const recordings = MicMemoExtract.extractRecordings(dat, idx);
+        if (recordings) {
+          found = found.concat(recordings);
+        }
+      }
+
+      if (stores.length === 0) {
+        status.textContent = 'There are no .DAT files here. Check that you chose GARMIN/Apps/DATA.';
+      } else if (found.length === 0) {
+        status.textContent = 'No MicMemo Pro recordings found in these files.';
+      } else {
+        status.textContent = found.length === 1 ? 'Found 1 recording.' : 'Found ' + found.length + ' recordings.';
+        all.hidden = found.length < 2;
+        found.forEach(show);
+      }
+    }
+
+    function show(recording) {
+      const url = URL.createObjectURL(new Blob([recording.data], { type: recording.mimeType }));
+      downloads.push({ url: url, name: recording.fileName });
+
+      const card = document.createElement('section');
+      card.className = 'recording';
+      const title = document.createElement('h2');
+      title.textContent = recording.fileName;
+      const details = document.createElement('p');
+      details.textContent = formatLength(recording.ms) + (recording.complete ? '' : ' (some of the audio is missing)');
+      if (recording.location) {
+        details.append(document.createElement('br'), 'Recorded at ', mapLink(recording.location));
+      }
+      const audio = document.createElement('audio');
+      audio.controls = true;
+      audio.preload = 'none';
+      audio.src = url;
+      const link = document.createElement('a');
+      link.className = 'download';
+      link.href = url;
+      link.download = recording.fileName;
+      link.textContent = 'Download';
+      card.append(title, details, audio, link);
+      list.append(card);
+    }
+
+    // The coordinates only leave this computer if the link is opened, so it says where it goes.
+    function mapLink(location) {
+      const lat = location.latitude.toFixed(5);
+      const lon = location.longitude.toFixed(5);
+      const link = document.createElement('a');
+      link.href = 'https://www.openstreetmap.org/?mlat=' + lat + '&mlon=' + lon + '#map=16/' + lat + '/' + lon;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = lat + ', ' + lon + ' (opens OpenStreetMap)';
+      return link;
+    }
+
+    // Folders dropped from the desktop arrive as entries that have to be walked.
+    function readEntry(entry) {
+      return new Promise(function (resolve) {
+        if (entry.isFile) {
+          entry.file(function (file) { resolve([file]); }, function () { resolve([]); });
+          return;
+        }
+        const reader = entry.createReader();
+        const collected = [];
+        (function readBatch() {
+          reader.readEntries(async function (entries) {
+            if (entries.length === 0) {
+              const nested = await Promise.all(collected.map(readEntry));
+              resolve(nested.flat());
+            } else {
+              collected.push.apply(collected, entries);
+              readBatch();
+            }
+          }, function () { resolve([]); });
+        })();
+      });
+    }
+
+    function start(files) {
+      process(files).catch(function (error) {
+        console.error(error);
+        status.textContent = 'These files could not be read. Try copying the DATA folder from the watch again.';
+      });
+    }
+
+    document.getElementById('folder').addEventListener('change', function (event) {
+      start(Array.from(event.target.files));
+    });
+    document.getElementById('files').addEventListener('change', function (event) {
+      start(Array.from(event.target.files));
+    });
+    document.getElementById('filesButton').addEventListener('click', function () {
+      document.getElementById('files').click();
+    });
+    document.getElementById('downloadAll').addEventListener('click', function () {
+      downloads.forEach(function (item, index) {
+        setTimeout(function () {
+          const link = document.createElement('a');
+          link.href = item.url;
+          link.download = item.name;
+          document.body.append(link);
+          link.click();
+          link.remove();
+        }, index * 400);
+      });
+    });
+
+    ['dragenter', 'dragover'].forEach(function (name) {
+      drop.addEventListener(name, function (event) {
+        event.preventDefault();
+        drop.classList.add('over');
+      });
+    });
+    ['dragleave', 'drop'].forEach(function (name) {
+      drop.addEventListener(name, function (event) {
+        event.preventDefault();
+        drop.classList.remove('over');
+      });
+    });
+    drop.addEventListener('drop', async function (event) {
+      const entries = Array.from(event.dataTransfer.items || [])
+        .map(function (item) { return item.webkitGetAsEntry && item.webkitGetAsEntry(); })
+        .filter(Boolean);
+      const files = entries.length
+        ? (await Promise.all(entries.map(readEntry))).flat()
+        : Array.from(event.dataTransfer.files);
+      start(files);
+    });
+  })();
+</script>
+</body>
+</html>
